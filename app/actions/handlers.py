@@ -82,7 +82,11 @@ def thin_positions(
     return kept
 
 
-def to_observation(position: AircraftPosition) -> dict:
+def source_name(serial_number: str, prefix: str) -> str:
+    return f"{prefix}{serial_number[-6:]}" if prefix else serial_number
+
+
+def to_observation(position: AircraftPosition, subject_name_prefix: str) -> dict:
     location = {"lat": position.latitude, "lon": position.longitude}
     if position.ellipsoid_height_m is not None:
         location["alt"] = position.ellipsoid_height_m
@@ -98,7 +102,7 @@ def to_observation(position: AircraftPosition) -> dict:
     }
     return {
         "source": position.serial_number,
-        "source_name": position.serial_number,
+        "source_name": source_name(position.serial_number, subject_name_prefix),
         "type": "tracking-device",
         "subject_type": SUBJECT_TYPE,
         "recorded_at": position.recorded_at.isoformat(),
@@ -155,7 +159,7 @@ async def action_pull_flight_positions(integration, action_config: PullFlightPos
         positions, last_recorded_at, timedelta(seconds=action_config.min_interval_seconds)
     )
 
-    observations = [to_observation(p) for p in positions]
+    observations = [to_observation(p, action_config.subject_name_prefix) for p in positions]
     for batch in generate_batches(observations, OBSERVATION_BATCH_SIZE):
         await send_observations_to_gundi(observations=batch, integration_id=str(integration.id))
 

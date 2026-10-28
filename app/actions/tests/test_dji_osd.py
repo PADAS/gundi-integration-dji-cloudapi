@@ -1,3 +1,4 @@
+import json
 from datetime import datetime, timezone
 
 import pytest
@@ -26,6 +27,32 @@ def test_ignores_gateway_telemetry():
 
 def test_ignores_aircraft_without_gps_fix():
     assert parse_aircraft_position(f"thing/product/{AIRCRAFT_SN}/osd", aircraft_osd(lat=0, lon=0)) is None
+
+
+def test_ignores_aircraft_with_no_satellites():
+    position = aircraft_osd(position_state={"gps_number": 0})
+    assert parse_aircraft_position(f"thing/product/{AIRCRAFT_SN}/osd", position) is None
+
+
+def test_missing_position_state_is_not_a_lost_fix():
+    # OSD is incremental: position_state is omitted when it hasn't changed.
+    payload = json.loads(aircraft_osd())
+    del payload["data"]["position_state"]
+    position = parse_aircraft_position(f"thing/product/{AIRCRAFT_SN}/osd", json.dumps(payload).encode())
+    assert position.gps_satellites is None
+
+
+@pytest.mark.parametrize("field", ["attitude_head", "horizontal_speed", "vertical_speed"])
+def test_aircraft_without_gateway_is_recognised_by_any_flight_field(field):
+    payload = {"timestamp": 1761573600000, "data": {"latitude": 1.0, "longitude": 2.0, field: 0}}
+    position = parse_aircraft_position(f"thing/product/{AIRCRAFT_SN}/osd", json.dumps(payload).encode())
+    assert position is not None
+
+
+def test_rc_without_gateway_is_ignored():
+    # An RC's own OSD carries position and battery but no attitude or speeds.
+    payload = {"timestamp": 1761573600000, "data": {"latitude": 1.0, "longitude": 2.0, "capacity_percent": 80}}
+    assert parse_aircraft_position(f"thing/product/{DOCK_SN}/osd", json.dumps(payload).encode()) is None
 
 
 def test_ignores_other_topics():

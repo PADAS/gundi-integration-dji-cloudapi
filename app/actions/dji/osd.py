@@ -54,13 +54,20 @@ class AircraftPosition:
         return AIRCRAFT_MODES.get(self.mode_code, f"Unknown ({self.mode_code})")
 
 
+# Fields only an aircraft's OSD carries. Docks and RCs report position, battery
+# and (docks) mode_code and position_state, but never attitude or speeds.
+AIRCRAFT_ONLY_FIELDS = ("attitude_head", "attitude_pitch", "attitude_roll", "horizontal_speed", "vertical_speed")
+
+
 def _is_aircraft(device_sn: str, envelope: dict, data: dict) -> bool:
     # Docks and RCs publish their own OSD on a topic named after themselves and
     # are their own gateway; an aircraft's OSD names its dock/RC as gateway.
     gateway = envelope.get("gateway")
     if gateway:
         return gateway != device_sn
-    return "attitude_head" in data
+    # OSD is incremental (only changed fields are sent), so check for any
+    # aircraft-only field rather than one in particular.
+    return any(field in data for field in AIRCRAFT_ONLY_FIELDS)
 
 
 def parse_aircraft_position(topic: str, payload: bytes) -> Optional[AircraftPosition]:
@@ -68,7 +75,8 @@ def parse_aircraft_position(topic: str, payload: bytes) -> Optional[AircraftPosi
 
     Returns None when the message is valid but carries no aircraft fix: another
     topic, gateway (dock/RC) telemetry, or an aircraft without GPS lock, which
-    DJI reports as 0,0. Raises InvalidOSDMessage for a malformed payload.
+    DJI reports as 0,0 or with no satellites. Raises InvalidOSDMessage for a
+    malformed payload.
     """
     match = OSD_TOPIC_PATTERN.match(topic)
     if not match:
@@ -97,6 +105,10 @@ def parse_aircraft_position(topic: str, payload: bytes) -> Optional[AircraftPosi
 
     battery = data.get("battery") if isinstance(data.get("battery"), dict) else {}
     position_state = data.get("position_state") if isinstance(data.get("position_state"), dict) else {}
+    # position_state is absent from messages where it didn't change, so only an
+    # explicit zero satellite count rules a fix out.
+    if position_state.get("gps_number") == 0:
+        return None
     return AircraftPosition(
         serial_number=device_sn,
         gateway_serial_number=envelope.get("gateway"),

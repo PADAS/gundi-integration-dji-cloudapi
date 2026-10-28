@@ -58,3 +58,9 @@ class PullFlightPositionsConfig(PullActionConfiguration):
         title="Aircraft Serial Numbers",
         description="Only send positions for these aircraft. Leave empty to send every aircraft on the broker.",
     )
+    subject_name_prefix: str = pydantic.Field(
+        "DJI ",
+        title="Subject Name Prefix",
+        description="New subjects are named with this prefix and the last 6 characters of the aircraft serial "
+                    "number, e.g. 'DJI 0BH5RF'. Leave empty to use the full serial number.",
+    )
