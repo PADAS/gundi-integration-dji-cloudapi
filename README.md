@@ -45,7 +45,8 @@ open, so the connector **drains the broker on a schedule**:
 2. The broker first delivers what it queued for that session since the last run, then live
    messages, for `listen_seconds` (default 50).
 3. Aircraft OSD messages become Gundi observations (`type: tracking-device`,
-   `subject_type: drone`, `source` = aircraft serial number, subject named e.g. `DJI 0BH5RF`).
+   `subject_type: drone`, `source` and `source_name` = the full aircraft serial number, which
+   Gundi uses as the EarthRanger subject name and source id).
    Dock and RC telemetry, and aircraft without a GPS fix (DJI reports `0,0` or zero satellites),
    are skipped. OSD messages only carry fields that changed, so a message without a position
    is skipped too, and `additional` holds whatever that message reported.
@@ -67,9 +68,8 @@ Observation fields: `location.alt` is DJI's ellipsoid `height`. `additional` car
 | Use TLS | Verifies the broker certificate against system CAs |
 | Username / Password | An MQTT account for Gundi with **subscribe** permission on `thing/product/+/osd` |
 
-**Pull Flight Positions**: `listen_seconds`, `min_interval_seconds`, an optional
-`aircraft_serial_numbers` allow-list, and `subject_name_prefix` (default `DJI `; leave it empty
-to name subjects by the full serial number).
+**Pull Flight Positions**: `listen_seconds`, `min_interval_seconds`, and an optional
+`aircraft_serial_numbers` allow-list.
 
 ### Broker requirements
 

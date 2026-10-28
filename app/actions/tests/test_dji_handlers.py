@@ -81,7 +81,7 @@ async def test_sends_aircraft_positions_thinned_by_interval(mocker, integration,
     ]
     assert sent[0] == {
         "source": AIRCRAFT_SN,
-        "source_name": f"DJI {AIRCRAFT_SN[-6:]}",
+        "source_name": AIRCRAFT_SN,
         "type": "tracking-device",
         "subject_type": "drone",
         "recorded_at": "2025-10-27T14:00:00+00:00",
@@ -179,18 +179,13 @@ async def test_replays_pilot2_capture(mocker, integration, state, sent):
 
     assert result["observations_extracted"] == 3
     first = sent[0]
-    assert first["source_name"] == "DJI 0000A1"
+    assert first["source"] == first["source_name"] == "MOCK5F1DJ34T000000A1"
     # On the ground in standby: height is the absolute altitude, elevation
     # (relative to takeoff) is 0.
     assert first["location"] == {"lat": -21.401153638547164, "lon": 28.340260079564025, "alt": 641.366943359375}
     assert first["additional"]["relative_height_m"] == 0
     assert first["additional"]["gps_satellites"] == 14
     assert "gateway_serial_number" not in first["additional"]
-
-
-@pytest.mark.parametrize("prefix, expected",[("DJI ", "DJI 0BH5RF"), ("", AIRCRAFT_SN)])
-def test_source_name(prefix, expected):
-    assert handlers.source_name(AIRCRAFT_SN, prefix) == expected
 
 
 def test_thinning_keeps_every_position_with_zero_interval():
