@@ -41,10 +41,10 @@ class PullFlightPositionsConfig(PullActionConfiguration):
     listen_seconds: int = pydantic.Field(
         50,
         title="Listen Duration (seconds)",
-        description="How long each run listens for telemetry. Runs start every minute, so keep this under 60 "
-                    "for near-continuous coverage.",
+        description="How long each run listens for telemetry. Runs start every minute and a run still "
+                    "connected when the next one starts makes that one wait, so this is capped at 50.",
         ge=5,
-        le=300,
+        le=50,
     )
     min_interval_seconds: int = pydantic.Field(
         10,

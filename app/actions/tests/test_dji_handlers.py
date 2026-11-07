@@ -1,14 +1,19 @@
+import json
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from uuid import uuid4
 
+import pydantic
 import pytest
+
+from gundi_core.events import LogLevel
 
 from app.actions import handlers
 from app.actions.configurations import PullFlightPositionsConfig
 from app.actions.dji.client import DJIMessage
 from app.actions.dji.exceptions import DJIAuthError, DJIConnectionError, DJIConnectionLost
 from app.actions.tests.dji_samples import AIRCRAFT_SN, DOCK_SN, aircraft_osd, dock_osd, load_capture
+from app.services.activity_logger import ephemeral_run
 from app.services.errors import IntegrationAuthError, IntegrationConnectionError
 
 T0 = 1761573600000  # 2025-10-27T14:00:00Z
@@ -34,8 +39,19 @@ def state(mocker):
     async def set_state(integration_id, action_id, value):
         store[(integration_id, action_id)] = value
 
+    async def set_if_absent(integration_id, action_id, *, ttl_seconds, source_id="no-source"):
+        if ephemeral_run.get() or (integration_id, action_id, source_id) in store:
+            return False
+        store[(integration_id, action_id, source_id)] = ttl_seconds
+        return True
+
+    async def delete_state(integration_id, action_id, source_id="no-source"):
+        store.pop((integration_id, action_id, source_id), None)
+
     mocker.patch.object(handlers.state_manager, "get_state", side_effect=get_state)
     mocker.patch.object(handlers.state_manager, "set_state", side_effect=set_state)
+    mocker.patch.object(handlers.state_manager, "set_if_absent", side_effect=set_if_absent)
+    mocker.patch.object(handlers.state_manager, "delete_state", side_effect=delete_state)
     return store
 
 
@@ -135,14 +151,19 @@ async def test_malformed_messages_are_skipped_and_reported(mocker, integration, 
 
 
 @pytest.mark.asyncio
-async def test_connection_lost_sends_partial_data_then_fails(mocker, integration, state, sent):
+async def test_connection_lost_sends_partial_data_and_warns_without_failing(mocker, integration, state, sent):
+    # Raising would make PubSub redeliver the run, which then overlaps the next scheduled one.
+    # Unacked messages stay queued on the broker for the next run, so a retry adds nothing.
     receive(mocker, side_effect=DJIConnectionLost("dropped", [osd(0)]))
 
-    with pytest.raises(IntegrationConnectionError):
-        await handlers.action_pull_flight_positions(integration, PullFlightPositionsConfig())
+    result = await handlers.action_pull_flight_positions(integration, PullFlightPositionsConfig())
 
     assert len(sent) == 1
-    assert state  # progress saved so the next run doesn't resend
+    assert result["observations_extracted"] == 1
+    assert any(v == {} for v in state.values()) is False and state  # progress saved
+    warning = handlers.log_action_activity.call_args
+    assert warning.kwargs["level"] == LogLevel.WARNING
+    assert "dropped" in warning.kwargs["title"]
 
 
 @pytest.mark.asyncio
@@ -166,6 +187,19 @@ async def test_auth_action_reports_credentials(mocker, integration):
 
     check.side_effect = DJIAuthError("refused")
     assert (await handlers.action_auth(integration, config))["valid_credentials"] is False
+
+
+@pytest.mark.asyncio
+async def test_auth_checks_use_distinct_client_ids(mocker, integration):
+    # Two concurrent credential checks must not take over each other's broker session.
+    check = mocker.patch.object(handlers.dji_client, "check_connection", return_value=None)
+    config = handlers.get_auth_config(integration)
+    await handlers.action_auth(integration, config)
+    await handlers.action_auth(integration, config)
+    ids = [call.kwargs["client_id"] for call in check.call_args_list]
+    assert len(set(ids)) == 2
+    assert all(i.startswith(f"gundi-dji-{integration.id}-auth") for i in ids)
+    assert all(i != handlers.mqtt_client_id(integration) for i in ids)
 
 
 @pytest.mark.asyncio
@@ -194,3 +228,92 @@ def test_thinning_keeps_every_position_with_zero_interval():
         SimpleNamespace(serial_number="A", recorded_at=base + timedelta(seconds=s)) for s in (0, 1, 2)
     ]
     assert len(handlers.thin_positions(positions, {}, timedelta(0))) == 3
+
+
+def test_listen_seconds_cannot_exceed_the_cron_period():
+    PullFlightPositionsConfig(listen_seconds=50)
+    with pytest.raises(pydantic.ValidationError):
+        PullFlightPositionsConfig(listen_seconds=51)
+
+
+@pytest.mark.asyncio
+async def test_overlapping_run_is_skipped_while_previous_run_holds_the_lock(mocker, integration, state, sent):
+    collect = receive(mocker, [osd(0)])
+    state[(str(integration.id), handlers.PULL_ACTION_ID, handlers.RUN_LOCK_SOURCE_ID)] = 80
+
+    result = await handlers.action_pull_flight_positions(integration, PullFlightPositionsConfig())
+
+    collect.assert_not_called()
+    assert sent == []
+    assert result["skipped"]
+
+
+@pytest.mark.asyncio
+async def test_run_lock_is_released_after_the_run(mocker, integration, state, sent):
+    receive(mocker, [osd(0)])
+    await handlers.action_pull_flight_positions(integration, PullFlightPositionsConfig(listen_seconds=20))
+    assert (str(integration.id), handlers.PULL_ACTION_ID, handlers.RUN_LOCK_SOURCE_ID) not in state
+    ttl = handlers.state_manager.set_if_absent.call_args.kwargs["ttl_seconds"]
+    assert ttl > 20  # covers the listen window plus connect and send time
+
+
+@pytest.mark.asyncio
+async def test_run_lock_is_released_when_the_run_fails(mocker, integration, state, sent):
+    receive(mocker, side_effect=DJIConnectionError("unreachable"))
+    with pytest.raises(IntegrationConnectionError):
+        await handlers.action_pull_flight_positions(integration, PullFlightPositionsConfig())
+    assert (str(integration.id), handlers.PULL_ACTION_ID, handlers.RUN_LOCK_SOURCE_ID) not in state
+
+
+@pytest.mark.asyncio
+async def test_ephemeral_run_does_not_need_the_lock(mocker, integration, state, sent):
+    # set_if_absent always answers False on the ephemeral path; the run must still happen.
+    receive(mocker, [osd(0)])
+    token = ephemeral_run.set(True)
+    try:
+        result = await handlers.action_pull_flight_positions(integration, PullFlightPositionsConfig())
+    finally:
+        ephemeral_run.reset(token)
+    assert result["observations_extracted"] == 1
+
+
+@pytest.mark.asyncio
+async def test_malformed_message_warnings_are_capped_per_run(mocker, integration, state, sent, caplog):
+    receive(mocker, [DJIMessage(OSD_TOPIC, b"garbage")] * 10)
+    with caplog.at_level("WARNING", logger=handlers.logger.name):
+        await handlers.action_pull_flight_positions(integration, PullFlightPositionsConfig())
+    warnings = [r for r in caplog.records if r.name == handlers.logger.name and r.levelname == "WARNING"]
+    assert len(warnings) == handlers.MAX_LOGGED_INVALID_MESSAGES
+    assert handlers.log_action_activity.call_args.kwargs["title"].startswith("Skipped 10")
+
+
+@pytest.mark.asyncio
+async def test_aircraft_unseen_for_a_day_are_dropped_from_state(mocker, integration, state, sent):
+    other = DJIMessage("thing/product/OTHERSN/osd", aircraft_osd(timestamp_ms=T0))
+    receive(mocker, [osd(0), other])
+    await handlers.action_pull_flight_positions(integration, PullFlightPositionsConfig())
+
+    two_days = 2 * 24 * 3600
+    receive(mocker, [osd(two_days)])
+    await handlers.action_pull_flight_positions(integration, PullFlightPositionsConfig())
+
+    saved = state[(str(integration.id), handlers.PULL_ACTION_ID)]
+    assert set(saved["aircraft"]) == {AIRCRAFT_SN}
+
+
+def pilot2_osd(seconds, **data):
+    # Pilot 2 publishes no gateway field; an aircraft is recognised by its flight fields.
+    payload = {"timestamp": T0 + seconds * 1000, "data": {"latitude": -1.2921, "longitude": 36.8219, **data}}
+    return DJIMessage(OSD_TOPIC, json.dumps(payload).encode())
+
+
+@pytest.mark.asyncio
+async def test_pilot2_aircraft_stays_classified_across_runs(mocker, integration, state, sent):
+    receive(mocker, [pilot2_osd(0, attitude_head=90.0, horizontal_speed=1.0)])
+    await handlers.action_pull_flight_positions(integration, PullFlightPositionsConfig())
+
+    # Incremental message: only the position changed, so no flight fields are present.
+    receive(mocker, [pilot2_osd(30)])
+    await handlers.action_pull_flight_positions(integration, PullFlightPositionsConfig())
+
+    assert [o["recorded_at"][-14:-6] for o in sent] == ["14:00:00", "14:00:30"]

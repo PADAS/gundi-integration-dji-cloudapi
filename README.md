@@ -41,17 +41,24 @@ open, so the connector **drains the broker on a schedule**:
 
 1. `pull_flight_positions` runs every minute. It connects with a stable client id
    (`gundi-dji-<integration id>`), a persistent session (`clean_session=False`) and a QoS 1
-   subscription to `thing/product/+/osd`.
+   subscription to `thing/product/+/osd`. A second connection with that client id would kick
+   the first, so each run takes a lock in integration state before connecting; a run that
+   starts while the previous one is still connected skips instead.
 2. The broker first delivers what it queued for that session since the last run, then live
-   messages, for `listen_seconds` (default 50).
+   messages, for `listen_seconds` (default and maximum 50). If the connection drops mid-run,
+   what arrived is sent and a warning is logged; what wasn't acknowledged stays queued on the
+   broker for the next run.
 3. Aircraft OSD messages become Gundi observations (`type: tracking-device`,
    `subject_type: drone`, `source` and `source_name` = the full aircraft serial number, which
    Gundi uses as the EarthRanger subject name and source id).
    Dock and RC telemetry, and aircraft without a GPS fix (DJI reports `0,0` or zero satellites),
    are skipped. OSD messages only carry fields that changed, so a message without a position
-   is skipped too, and `additional` holds whatever that message reported.
+   is skipped too, and `additional` holds whatever that message reported. Pilot 2 sends no
+   `gateway` field, so an aircraft is recognised there by its attitude or speed fields; once
+   recognised, its serial stays an aircraft even when a later message carries none of them.
 4. Positions are thinned per aircraft to `min_interval_seconds` (default 10). The last sent
    timestamp per aircraft is kept in integration state, so redelivered messages aren't resent.
+   Aircraft not heard from for a day are dropped from state.
 
 Observation fields: `location.alt` is DJI's ellipsoid `height`. `additional` carries
 `relative_height_m` (above takeoff), `heading_deg`, `horizontal_speed_mps`,

@@ -68,3 +68,19 @@ def test_unknown_mode_is_labelled():
 def test_malformed_payload_raises(payload):
     with pytest.raises(InvalidOSDMessage):
         parse_aircraft_position(f"thing/product/{AIRCRAFT_SN}/osd", payload)
+
+
+@pytest.mark.parametrize("timestamp", [True, 1761573600000.5, "1761573600000"])
+def test_timestamp_must_be_an_integer(timestamp):
+    payload = json.loads(aircraft_osd())
+    payload["timestamp"] = timestamp
+    with pytest.raises(InvalidOSDMessage):
+        parse_aircraft_position(f"thing/product/{AIRCRAFT_SN}/osd", json.dumps(payload).encode())
+
+
+def test_known_aircraft_without_gateway_or_flight_fields_is_recognised():
+    # Incremental OSD from a Pilot 2 aircraft: position changed, attitude and speeds didn't.
+    payload = {"timestamp": 1761573600000, "data": {"latitude": 1.0, "longitude": 2.0}}
+    topic = f"thing/product/{AIRCRAFT_SN}/osd"
+    assert parse_aircraft_position(topic, json.dumps(payload).encode()) is None
+    assert parse_aircraft_position(topic, json.dumps(payload).encode(), known_aircraft={AIRCRAFT_SN}) is not None

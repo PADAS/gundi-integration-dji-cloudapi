@@ -2,7 +2,7 @@ import json
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Optional
+from typing import AbstractSet, Optional
 
 from .exceptions import InvalidOSDMessage
 
@@ -59,19 +59,30 @@ class AircraftPosition:
 AIRCRAFT_ONLY_FIELDS = ("attitude_head", "attitude_pitch", "attitude_roll", "horizontal_speed", "vertical_speed")
 
 
-def _is_aircraft(device_sn: str, envelope: dict, data: dict) -> bool:
+def _is_aircraft(device_sn: str, envelope: dict, data: dict, known_aircraft: AbstractSet[str]) -> bool:
     # Docks and RCs publish their own OSD on a topic named after themselves and
     # are their own gateway; an aircraft's OSD names its dock/RC as gateway.
     gateway = envelope.get("gateway")
     if gateway:
         return gateway != device_sn
-    # OSD is incremental (only changed fields are sent), so check for any
-    # aircraft-only field rather than one in particular.
-    return any(field in data for field in AIRCRAFT_ONLY_FIELDS)
+    # Pilot 2 sends no gateway. OSD is incremental (only changed fields are
+    # sent), so an aircraft is recognised by any aircraft-only field, and once
+    # recognised it stays an aircraft even when a later message carries none.
+    return device_sn in known_aircraft or any(field in data for field in AIRCRAFT_ONLY_FIELDS)
 
 
-def parse_aircraft_position(topic: str, payload: bytes) -> Optional[AircraftPosition]:
+def _subdict(data: dict, key: str) -> dict:
+    value = data.get(key)
+    return value if isinstance(value, dict) else {}
+
+
+def parse_aircraft_position(
+    topic: str, payload: bytes, known_aircraft: AbstractSet[str] = frozenset()
+) -> Optional[AircraftPosition]:
     """Parse one OSD message into an aircraft position.
+
+    `known_aircraft` are serials already established as aircraft, for gateway-less
+    (Pilot 2) messages that carry none of the fields that would identify one.
 
     Returns None when the message is valid but carries no aircraft fix: another
     topic, gateway (dock/RC) telemetry, or an aircraft without GPS lock, which
@@ -91,20 +102,24 @@ def parse_aircraft_position(topic: str, payload: bytes) -> Optional[AircraftPosi
         raise InvalidOSDMessage(f"OSD payload on {topic} has no data object")
     data = envelope["data"]
 
-    if not _is_aircraft(device_sn, envelope, data):
+    if not _is_aircraft(device_sn, envelope, data, known_aircraft):
         return None
 
     latitude, longitude = data.get("latitude"), data.get("longitude")
     if latitude is None or longitude is None or (latitude == 0 and longitude == 0):
         return None
 
+    # DJI sends the timestamp as integer milliseconds; bool is an int subclass.
+    timestamp = envelope.get("timestamp")
+    if not isinstance(timestamp, int) or isinstance(timestamp, bool):
+        raise InvalidOSDMessage(f"OSD payload on {topic} has no valid timestamp")
     try:
-        recorded_at = datetime.fromtimestamp(int(envelope["timestamp"]) / 1000, tz=timezone.utc)
-    except (KeyError, TypeError, ValueError, OverflowError) as e:
+        recorded_at = datetime.fromtimestamp(timestamp / 1000, tz=timezone.utc)
+    except (ValueError, OverflowError, OSError) as e:
         raise InvalidOSDMessage(f"OSD payload on {topic} has no valid timestamp") from e
 
-    battery = data.get("battery") if isinstance(data.get("battery"), dict) else {}
-    position_state = data.get("position_state") if isinstance(data.get("position_state"), dict) else {}
+    battery = _subdict(data, "battery")
+    position_state = _subdict(data, "position_state")
     # position_state is absent from messages where it didn't change, so only an
     # explicit zero satellite count rules a fix out.
     if position_state.get("gps_number") == 0:
