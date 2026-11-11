@@ -85,6 +85,13 @@ Observation fields: `location.alt` is DJI's ellipsoid `height`. `additional` car
 - Each integration uses one client id. Don't run two integrations of this type against the same
   broker with the same Gundi integration id.
 
+## Local testing and demos
+
+No DJI hardware is needed to exercise the connector end to end. `local/docker-compose.yml`
+includes a Mosquitto broker configured as above, and `local/helpers/publish_dji_osd.py`
+publishes OSD to it, either a synthetic flight (dock or Pilot 2 style) or a replay of a
+recorded capture. See `local/LOCAL_DEVELOPMENT.md`.
+
 ## Development
 
 ```bash
