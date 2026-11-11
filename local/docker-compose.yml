@@ -38,6 +38,23 @@ services:
       command: ["source /helpers/create_subscriptions.sh"]
       volumes:
         - ./helpers:/helpers
+  mosquitto:
+    # Stand-in for the operator's DJI Cloud API broker. Reachable as
+    # localhost:1883 from the host and mosquitto:1883 from the runner.
+    # Feed it with helpers/publish_dji_osd.py; see LOCAL_DEVELOPMENT.md.
+    image: eclipse-mosquitto:2
+    container_name: mosquitto
+    ports:
+      - "1883:1883"
+    volumes:
+      - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - mosquitto_data:/mosquitto/data
+    healthcheck:
+      test: ["CMD-SHELL", "mosquitto_sub -t '$$SYS/broker/uptime' -C 1 -i healthcheck -W 3"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   fastapi:
     build:
       context: ..
@@ -86,3 +103,6 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+
+volumes:
+  mosquitto_data:
